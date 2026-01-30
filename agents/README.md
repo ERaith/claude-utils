@@ -15,16 +15,17 @@ Or ask Claude: "Resume agent AGENT_ID" or "Resume the transmission-optimizer age
 
 ## Agent Registry
 
-### Transmission Optimizer
+### 🩺 torrent-doctor
 - **Agent ID**: `a6e5bf0`
+- **Alias**: `torrent-doctor`
 - **Created**: 2026-01-30
-- **Purpose**: Optimizes Transmission torrent client for NordVPN with closed port
+- **Purpose**: Diagnoses and fixes Transmission torrent download issues for NordVPN with closed port
 - **Tasks**:
-  1. Removes low-availability torrents
-  2. Optimizes Transmission settings for closed-port operation
-  3. Analyzes and prioritizes remaining torrents
+  1. Removes low-availability torrents (cleans up the patient list)
+  2. Optimizes Transmission settings for closed-port operation (prescribes treatment)
+  3. Analyzes and prioritizes remaining torrents (triage system)
 - **Status**: Paused (waiting for user input on partial data handling)
-- **Resume command**: Resume agent a6e5bf0
+- **Resume command**: "Resume agent a6e5bf0" or "Resume torrent-doctor"
 
 ---
 
