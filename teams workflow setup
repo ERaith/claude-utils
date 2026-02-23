@@ -1,0 +1,495 @@
+# Multi-Agent Orchestration Setup for Claude Code
+
+Copy everything below the line and paste it as a single message into a Claude Code session.
+
+---
+
+Set up a multi-agent orchestration system for Claude Code. This adds:
+
+1. **task-implementer agent** â€” General-purpose code-writing agent that accepts structured specs and returns structured reports
+2. **plan-executor skill** â€” Orchestration engine: parses plans into dependency graphs, groups into parallel waves, dispatches agents, runs quality gates
+3. **Enhanced /orchestrate command** â€” Adds `plan`, `implement`, and `custom` modes with `,` (sequential) and `+` (parallel) agent chaining
+4. **Orchestration logging hook** â€” Logs every agent dispatch to `~/.claude/orchestration.log`
+5. **Agent Teams flag** â€” Enables native multi-agent coordination
+
+Create these directories first:
+
+```bash
+mkdir -p ~/.claude/agents ~/.claude/skills/plan-executor ~/.claude/scripts/hooks ~/.claude/commands
+```
+
+Then create these 4 files with the exact content specified, and update settings.json.
+
+## FILE 1: ~/.claude/agents/task-implementer.md
+
+<FILE_CONTENT path="~/.claude/agents/task-implementer.md">
+---
+name: task-implementer
+description: General-purpose implementation worker with full write access. Executes structured task specs â€” the only agent designed for autonomous code writing from specifications. Use for plan execution, feature implementation, and any task requiring file modifications.
+tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
+model: sonnet
+---
+
+# Task Implementer
+
+You are an autonomous implementation agent. You receive structured task specifications and execute them precisely, producing structured completion reports.
+
+## Input Format
+
+You will receive a task spec in this format:
+
+```
+ACTION: <create|modify|delete|refactor|configure>
+FILES: <list of files to touch>
+CONSTRAINTS: <project patterns, restrictions, style rules>
+CONTEXT: <relevant background, handoff from previous agent>
+VERIFICATION: <command to run after implementation>
+ACCEPTANCE: <criteria for success>
+```
+
+If the spec is missing critical information, return BLOCKED status immediately with specific questions.
+
+## Execution Protocol
+
+### 1. Understand
+- Parse the task spec completely
+- Identify all files mentioned
+- Read each target file (and its imports/dependencies) before modifying
+- Identify existing patterns in the codebase to follow
+
+### 2. Implement
+- Make changes file by file
+- Follow existing project conventions (naming, structure, patterns)
+- Only modify files listed in the spec unless a dependency clearly requires it
+- Prefer minimal, focused changes â€” no drive-by refactoring
+- Use immutable patterns where applicable
+
+### 3. Verify
+- Run the verification command if provided
+- Check that acceptance criteria are met
+- Ensure no unintended side effects (run linter/typecheck if available)
+
+### 4. Report
+- Return a structured completion report (format below)
+
+## Constraints
+
+- **Scope**: Only modify files specified in the task spec. If you discover a necessary change to an unlisted file, note it in the report but do NOT make the change unless it's trivially required (e.g., an import statement).
+- **Retries**: If implementation fails verification, retry up to 3 times with different approaches. After 3 failures, return BLOCKED.
+- **Ambiguity**: If the spec is ambiguous on a critical decision, return BLOCKED rather than guessing. List the specific questions that need answers.
+- **Patterns**: Match the existing codebase style. Read neighboring files to understand conventions before writing.
+
+## Output Format
+
+Always return a structured completion report:
+
+```
+STATUS: <DONE|BLOCKED|PARTIAL>
+
+FILES_MODIFIED:
+- <path> â€” <what changed>
+
+FILES_CREATED:
+- <path> â€” <purpose>
+
+VERIFICATION:
+- Command: <what was run>
+- Result: <PASS|FAIL>
+- Output: <relevant output snippet>
+
+NOTES:
+- <anything the orchestrator should know>
+- <discovered issues, suggested follow-ups>
+
+BLOCKED_ON: (only if STATUS is BLOCKED)
+- <specific question or missing information>
+```
+
+## Anti-Patterns
+
+- Do NOT refactor code outside the task scope
+- Do NOT add comments explaining what you changed
+- Do NOT add features not in the spec
+- Do NOT leave TODO comments â€” either implement it or note it in BLOCKED_ON
+- Do NOT guess at ambiguous requirements â€” ask via BLOCKED status
+- Do NOT modify test files unless the spec explicitly includes them
+</FILE_CONTENT>
+
+## FILE 2: ~/.claude/skills/plan-executor/SKILL.md
+
+<FILE_CONTENT path="~/.claude/skills/plan-executor/SKILL.md">
+---
+name: plan-executor
+description: Orchestration engine that accepts structured implementation plans and executes them via dependency-aware wave dispatch. Parses plans into steps, builds dependency graphs, groups into parallel waves, dispatches task-implementer agents, runs quality gates, and produces completion reports.
+allowed-tools: Task, TaskCreate, TaskUpdate, TaskList, Read, Write, Edit, Bash, Grep, Glob
+---
+
+# Plan Executor
+
+Accept a structured implementation plan and execute it through dependency-aware wave dispatch with quality gates.
+
+## When Invoked
+
+Via /orchestrate:
+- `/orchestrate plan <description>` â€” planner agent creates plan, then this executes it
+- `/orchestrate implement <path>` â€” reads plan from file, executes it
+
+Direct:
+- `/plan-executor <plan-file-path>`
+- `/plan-executor inline` â€” expects plan in the conversation
+
+## Input Format
+
+Plans must contain structured steps. The executor parses these formats:
+
+### Format 1: Phase/Step Markdown
+
+```
+### Phase 1: Setup
+1. **Step Name** (File: path/to/file.ts)
+   - Action: What to do
+   - Dependencies: None | Step X
+   - Risk: Low/Medium/High
+```
+
+### Format 2: Structured Task List
+
+```
+- [ ] Step 1: Description {files: [a.ts, b.ts], depends: [], action: create}
+- [ ] Step 2: Description {files: [c.ts], depends: [1], action: modify}
+```
+
+### Format 3: Freeform (auto-parsed)
+Any plan with numbered steps, file paths, and describable actions.
+
+## 6-Phase Protocol
+
+### Phase 1: Ingest
+
+Parse the plan into a normalized step list:
+
+```
+STEP:
+  id: <sequential number>
+  name: <step name>
+  action: <create|modify|delete|refactor|configure|command>
+  files: [<file paths>]
+  description: <what to do>
+  dependencies: [<step ids>]
+  phase: <phase name from plan>
+  risk: <low|medium|high>
+  type: <agent|direct>
+```
+
+Parsing rules:
+- Extract file paths from `File:`, `(File: ...)`, backtick paths, or inline references
+- Extract dependencies from `Dependencies:`, `Requires:`, `depends:`, `after step X`
+- Infer dependencies when steps share files (later step depends on earlier)
+- Mark as `type: direct` if the step is a simple shell command (mkdir, npm install, cp, mv, chmod)
+- Mark as `type: agent` if the step requires reading/writing code
+
+Display parsed step table for verification before proceeding.
+
+### Phase 2: Graph
+
+Build dependency graph and group into parallel execution waves:
+
+Wave rules:
+1. Steps in different plan phases are always sequential
+2. Same phase, no shared files, no dependency chain = parallel (same wave)
+3. Same phase with shared files = sequential within wave
+4. Max 4 agents per wave
+5. `type: direct` steps execute inline
+
+Algorithm:
+1. Topological sort all steps by dependencies
+2. Assign wave numbers (Wave 0 = no deps, Wave N = all deps in earlier waves)
+3. Check for file conflicts within waves, split if needed
+4. Cap each wave at 4 parallel steps, overflow to next wave
+
+Display wave execution plan before proceeding.
+
+### Phase 3: Pre-flight
+
+1. Confirm working directory exists
+2. Check git status, warn if dirty
+3. Verify files referenced in `modify` actions exist
+4. Check that tools/packages referenced are installed
+5. Create TaskCreate entries with dependencies via `addBlockedBy`
+6. Present execution plan, await confirmation
+
+If any check fails: STOP and report.
+
+### Phase 4: Execute
+
+Process waves sequentially. Within each wave, dispatch agents in parallel.
+
+Per wave:
+1. Mark tasks in_progress via TaskUpdate
+2. Dispatch agents:
+   - `type: agent` steps â†’ task-implementer subagent with structured spec
+   - `type: direct` steps â†’ execute via Bash directly
+   - Quality gate steps â†’ code-reviewer or security-reviewer
+3. Collect results, parse structured reports
+4. Handle failures:
+   - DONE â†’ TaskUpdate completed, continue
+   - PARTIAL â†’ log warning, continue if non-blocking
+   - BLOCKED â†’ stop wave, surface questions, await resolution
+5. Git checkpoint after each wave (if git initialized and changes exist)
+6. Collect handoff context for next wave
+
+### Phase 5: Quality Gate (Optional)
+
+After all implementation waves:
+1. Dispatch code-reviewer + security-reviewer in parallel
+2. CRITICAL issues â†’ STOP, require fixes
+3. HIGH issues â†’ report with recommendations
+4. If fixes needed â†’ dispatch task-implementer, re-run gate (max 2 cycles)
+
+Skip when: config-only plan, plan says skip, all steps were direct.
+
+### Phase 6: Report
+
+```
+PLAN EXECUTION REPORT
+=====================
+Plan: <name/description>
+Waves: <N>
+Status: <COMPLETE|PARTIAL|BLOCKED>
+
+WAVE SUMMARY
+------------
+Wave 1: [DONE] Step 1, Step 3
+Wave 2: [DONE] Step 2
+
+FILES CHANGED
+-------------
+Created: ...
+Modified: ...
+
+QUALITY GATE
+------------
+Code Review: PASS/FAIL
+Security: PASS/FAIL
+
+NEXT STEPS
+----------
+- follow-up items
+```
+
+## Error Handling
+
+| Scenario | Action |
+|----------|--------|
+| Step fails verification | Retry up to 3 times, then BLOCKED |
+| Agent times out | Mark PARTIAL, continue, note in report |
+| File conflict detected | Serialize, don't parallelize |
+| Git checkpoint fails | Warn but continue |
+| All steps in wave BLOCKED | Stop, report blockers |
+| Pre-flight fails | Stop before execution |
+</FILE_CONTENT>
+
+## FILE 3: ~/.claude/commands/orchestrate.md
+
+<FILE_CONTENT path="~/.claude/commands/orchestrate.md">
+# Orchestrate Command
+
+Agent orchestration for complex tasks â€” from preset workflows to full plan execution.
+
+## Usage
+
+`/orchestrate [mode] [arguments]`
+
+## Modes
+
+### Preset Workflows
+
+**feature**: `planner -> tdd-guide -> code-reviewer -> security-reviewer`
+**bugfix**: `planner -> tdd-guide -> code-reviewer`
+**refactor**: `architect -> code-reviewer -> tdd-guide`
+**security**: `security-reviewer -> code-reviewer -> architect`
+
+### Plan-Based Execution
+
+**plan** â€” Generate a plan then execute it:
+```
+/orchestrate plan "Add retry logic to all API endpoints"
+```
+Flow: planner agent creates plan â†’ user confirms â†’ plan-executor executes with wave dispatch
+
+**implement** â€” Execute an existing plan file:
+```
+/orchestrate implement ~/docs/plans/auth-migration.md
+```
+Flow: plan-executor reads file â†’ parses â†’ graphs â†’ executes
+
+### Custom Orchestration
+
+**custom** â€” Define agent sequence with explicit parallelism:
+```
+/orchestrate custom "planner,task-implementer,code-reviewer+security-reviewer" "Add caching"
+```
+- `,` = sequential (one after another)
+- `+` = parallel (run simultaneously)
+
+## Execution Pattern
+
+### For Preset & Custom Workflows
+
+1. Invoke agent with context from previous agent
+2. Collect output as structured handoff document
+3. Pass to next agent in chain
+4. Aggregate results into final report
+
+### For Plan-Based Execution
+
+The plan-executor skill handles:
+1. **Ingest** â€” Parse plan into steps with dependencies
+2. **Graph** â€” Build dependency graph, group into parallel waves
+3. **Pre-flight** â€” Verify readiness, create task board
+4. **Execute** â€” Dispatch task-implementer agents per wave
+5. **Quality gate** â€” code-reviewer + security-reviewer
+6. **Report** â€” Completion summary
+
+## Handoff Document Format
+
+```
+## HANDOFF: [previous-agent] -> [next-agent]
+### Context â€” [Summary of what was done]
+### Findings â€” [Key discoveries or decisions]
+### Files Modified â€” [List of files touched]
+### Open Questions â€” [Unresolved items for next agent]
+### Recommendations â€” [Suggested next steps]
+```
+
+## Arguments
+
+$ARGUMENTS:
+- `feature <description>` - Full feature workflow
+- `bugfix <description>` - Bug fix workflow
+- `refactor <description>` - Refactoring workflow
+- `security <description>` - Security review workflow
+- `plan <description>` - Generate plan then execute via plan-executor
+- `implement <file-path>` - Execute existing plan file via plan-executor
+- `custom <agent-spec> <description>` - Custom agent sequence (`,` sequential, `+` parallel)
+
+## Available Agents
+
+| Agent | Purpose | Has Write Access |
+|-------|---------|-----------------|
+| `planner` | Implementation planning | No |
+| `architect` | System design | No |
+| `task-implementer` | General-purpose code writing | Yes |
+| `tdd-guide` | Test-driven development | Yes |
+| `code-reviewer` | Code quality review | Read-only |
+| `security-reviewer` | Security audit | Yes |
+| `build-error-resolver` | Fix build errors | Yes |
+| `refactor-cleaner` | Dead code cleanup | Yes |
+</FILE_CONTENT>
+
+## FILE 4: ~/.claude/scripts/hooks/orchestration-log.js
+
+<FILE_CONTENT path="~/.claude/scripts/hooks/orchestration-log.js">
+#!/usr/bin/env node
+
+// PostToolUse hook for Task tool â€” logs subagent dispatch and completion
+// Appends to ~/.claude/orchestration.log for visibility into agent orchestration
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const LOG_FILE = path.join(os.homedir(), '.claude', 'orchestration.log');
+
+let data = '';
+process.stdin.on('data', chunk => data += chunk);
+process.stdin.on('end', () => {
+  try {
+    const input = JSON.parse(data);
+    const toolName = input.tool_name || '';
+
+    if (toolName !== 'Task') {
+      process.stdout.write(data);
+      return;
+    }
+
+    const toolInput = input.tool_input || {};
+    const toolOutput = input.tool_output || {};
+    const timestamp = new Date().toISOString();
+
+    const agentType = toolInput.subagent_type || 'unknown';
+    const description = toolInput.description || 'no description';
+    const model = toolInput.model || 'inherited';
+    const background = toolInput.run_in_background ? 'background' : 'foreground';
+
+    const outputText = typeof toolOutput === 'string'
+      ? toolOutput
+      : (toolOutput.output || toolOutput.result || '');
+    const statusMatch = outputText.match(/STATUS:\s*(DONE|BLOCKED|PARTIAL|ERROR)/i);
+    const status = statusMatch ? statusMatch[1] : 'completed';
+
+    const filesMatch = outputText.match(/FILES_MODIFIED:\n([\s\S]*?)(?:\n\n|\nFILES_CREATED|\nVERIFICATION|\nNOTES|\nBLOCKED)/i);
+    const filesModified = filesMatch ? filesMatch[1].trim() : '';
+
+    const logEntry = [
+      `[${timestamp}] AGENT_DISPATCH`,
+      `  type: ${agentType}`,
+      `  model: ${model}`,
+      `  mode: ${background}`,
+      `  desc: ${description}`,
+      `  status: ${status}`,
+      filesModified ? `  files:\n${filesModified.split('\n').map(f => `    ${f.trim()}`).join('\n')}` : '',
+      '---',
+      ''
+    ].filter(Boolean).join('\n');
+
+    fs.appendFileSync(LOG_FILE, logEntry);
+    process.stderr.write(`[Orchestration] ${agentType} (${model}) â€” ${description} â€” ${status}\n`);
+  } catch (e) {
+    process.stderr.write(`[Orchestration] Log error: ${e.message}\n`);
+  }
+
+  process.stdout.write(data);
+});
+</FILE_CONTENT>
+
+## SETTINGS.JSON CHANGES
+
+Merge these into the existing `~/.claude/settings.json`. Do NOT replace the file â€” add to it.
+
+### Add `env` key (top level):
+
+```json
+"env": {
+  "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+  "BASH_DEFAULT_TIMEOUT_MS": "600000",
+  "BASH_MAX_TIMEOUT_MS": "3600000"
+}
+```
+
+### Add to `hooks.PostToolUse` array:
+
+```json
+{
+  "matcher": "Task",
+  "hooks": [
+    {
+      "type": "command",
+      "command": "node \"HOMEDIR/.claude/scripts/hooks/orchestration-log.js\""
+    }
+  ]
+}
+```
+
+Replace `HOMEDIR` with the actual home directory path (e.g., `/home/username` or `/Users/username`).
+
+If no `hooks` section exists yet, create the full structure. If `PostToolUse` exists, append this entry to the array.
+
+## VERIFICATION
+
+After creating everything, run:
+```bash
+ls ~/.claude/agents/task-implementer.md && ls ~/.claude/skills/plan-executor/SKILL.md && ls ~/.claude/commands/orchestrate.md && ls ~/.claude/scripts/hooks/orchestration-log.js && grep AGENT_TEAMS ~/.claude/settings.json && grep orchestration-log ~/.claude/settings.json && echo "All checks passed"
+```
+
+Report what was created and confirm the setup is complete.
