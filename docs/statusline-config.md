@@ -9,13 +9,16 @@ The status line is configured in `~/.claude/settings.local.json` and runs `/home
 The status line displays at the bottom of your terminal and includes:
 
 1. **Model** - Current Claude model (sonnet/opus/haiku)
-2. **Current Directory** - Your working directory (~ for home)
-3. **Git Branch** - Current git branch (when in a repo)
-4. **Dirty Indicator** - `*` appears if you have uncommitted changes
+2. **Hostname** - Short hostname of the current machine (useful when SSH'd into multiple hosts)
+3. **Current Directory** - Your working directory (~ for home)
+4. **Git Branch** - Current git branch (when in a repo)
+5. **Dirty Indicator** - `*` appears if you have uncommitted changes
+6. **Bigboy Storage %** - Current usage percentage of `/media/bigboy` (primary media drive)
+7. **Active Download Count** - Number of active Transmission downloads (hidden when zero)
 
 **Example Output:**
 ```
-sonnet | ~/claude-utils | master*
+sonnet | eraith-server | ~/claude-utils | master* | bigboy:58% | dl:3
 ```
 
 ## Configuration Details
@@ -42,6 +45,9 @@ The status line script runs every time your prompt is displayed, providing real-
 - **Git Awareness**: Automatically detects when you're in a git repository
 - **Model Awareness**: Shows which Claude model is currently active
 - **Directory Awareness**: Always shows your current working directory
+- **Hostname Awareness**: Displays the short hostname so you always know which machine you're on
+- **Storage Monitoring**: Runs a fast `df` call against `/media/bigboy` to show current disk usage
+- **Download Monitoring**: Queries the Transmission RPC API (1s timeout) for active torrent count; hidden when zero
 
 ## Customization
 
@@ -61,4 +67,4 @@ If the status line doesn't appear:
 ---
 
 **Configured**: 2026-01-30
-**Last Updated**: 2026-01-30
+**Last Updated**: 2026-03-14
