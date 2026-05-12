@@ -1,0 +1,51 @@
+# pr-watcher example config. Copy to ~/.config/pr-watcher/config.yaml and edit.
+#
+# Every field below is also overridable via env var (PR_WATCHER_* prefix). See
+# README.md for the full list.
+
+# How often each repo is polled. Minimum 5s.
+poll_interval: 60s
+
+# Number of worker goroutines that run `claude` and post comments. Each worker
+# is a single concurrent review. 2 is a safe default — bump only after you've
+# verified your `claude` subscription handles concurrency comfortably.
+review_workers: 2
+
+# Hard cap on reviews posted per repo per 24h window. Prevents runaway costs if
+# a CI bot opens hundreds of PRs in a short window.
+daily_review_cap: 20
+
+# JSON dedup state file. Created on first run. "~" is expanded to $HOME.
+state_file: ~/.cache/pr-watcher/state.json
+
+# HTTP listener for /ws, /health, /state.
+http_addr: ":8782"
+
+# `claude` CLI binary. Override if the binary is in a non-default location.
+# Default: "claude" (resolved via PATH).
+claude_bin: claude
+
+# Agent name or path passed to `claude --agent`. The pr-watcher.md team agent
+# lives in this repo at agents/team/pr-watcher.md and dispatches the bundled
+# code-reviewer subagent — point at code-reviewer here unless you have a custom
+# reviewer agent.
+reviewer_agent: code-reviewer
+
+# Optional. Forwarded to `claude --model`. Leave empty to let the CLI pick.
+# Sonnet is fine for reviews; opus only if you really need the depth.
+# reviewer_model: sonnet
+
+repos:
+  - provider: github
+    repo: ERaith/claude-utils
+    enabled: true
+
+  # Example second repo (disabled by default).
+  - provider: github
+    repo: ERaith/homelab
+    enabled: false
+
+  # GitLab example. Requires `glab auth login` on the host.
+  - provider: gitlab
+    repo: my-group/my-project
+    enabled: false
