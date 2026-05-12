@@ -1,0 +1,33 @@
+[Unit]
+Description=pr-watcher: poll Git hosts for PRs, dispatch Claude reviews
+Documentation=https://github.com/ERaith/claude-utils/tree/master/tools/pr-watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Resolved against the user's PATH; gh, glab, and claude must also be on PATH.
+ExecStart=%h/go/bin/pr-watcher --config %h/.config/pr-watcher/config.yaml
+
+# Restart on crash, but back off so a broken config doesn't spin.
+Restart=on-failure
+RestartSec=10s
+
+# Logging — slog already emits JSON to stdout.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pr-watcher
+
+# Environment (override here if needed). Never set ANTHROPIC_API_KEY.
+Environment=LOG_LEVEL=info
+
+# Hardening (--user units can apply most of these).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/.cache/pr-watcher %h/.config/pr-watcher
+ProtectHome=read-only
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target
